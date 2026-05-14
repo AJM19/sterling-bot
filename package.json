@@ -14,7 +14,7 @@
     "dry-run": "DRY_RUN=true OVERRIDE_FIRE_NOW=true HEADLESS=false tsx --env-file=.env src/index.ts"
   },
   "dependencies": {
-    "playwright": "^1.49.1"
+    "playwright": "1.60.0"
   },
   "devDependencies": {
     "@types/node": "^20.19.41",
