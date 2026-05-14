@@ -60,48 +60,56 @@ export async function book(opts: BookerOptions): Promise<void> {
       log.warn('booker.wait.bypassed', { reason: 'OVERRIDE_FIRE_NOW' });
     }
 
+    // Primary attempt: user's preferred holes setting (default 18).
+    await setHoles(page, opts.holes);
     await clickTargetDay(page, target);
-    await screenshot(page, screenshotDir, '04-time-slots');
+    await screenshot(page, screenshotDir, '04-time-slots-primary');
 
-    const slots = await readAvailableSlots(page);
-    log.info('booker.slots.found', {
-      count: slots.length,
-      slots: slots.map(s => ({ time: s.time12, hole: s.hole })),
-    });
+    let chosen = await findEarliestInWindow(page, opts, opts.holes);
+    let holesUsed = opts.holes;
 
-    if (slots.length === 0) {
-      const html = await page.content();
-      const htmlPath = path.join(screenshotDir, 'page-when-no-slots.html');
-      await fs.writeFile(htmlPath, html);
-      log.warn('booker.slots.dump_html', { file: htmlPath, size: html.length });
+    // Fallback: if the user wanted 18 holes and nothing's in window, try 9 holes.
+    if (!chosen && opts.holes !== 9) {
+      log.info('booker.fallback.trying_9_holes', { primary_holes: opts.holes });
+      await setHoles(page, 9);
+      await clickTargetDay(page, target);
+      await screenshot(page, screenshotDir, '04b-time-slots-9-holes');
+      chosen = await findEarliestInWindow(page, opts, 9);
+      if (chosen) holesUsed = 9;
     }
 
-    const inWindow = slots
-      .filter(s => s.time24 >= opts.targetTimeMin && s.time24 <= opts.targetTimeMax)
-      .sort((a, b) => a.time24.localeCompare(b.time24));
-
-    if (inWindow.length === 0) {
-      log.warn('booker.no_slots_in_window', {
-        window: [opts.targetTimeMin, opts.targetTimeMax],
-        available: slots.map(s => s.time12),
-      });
+    if (!chosen) {
+      log.warn('booker.no_slots_any_holes', { window: [opts.targetTimeMin, opts.targetTimeMax] });
       return;
     }
 
-    const chosen = inWindow[0];
-    log.info('booker.slot.chosen', { time: chosen.time12, hole: chosen.hole, label: chosen.rawLabel });
+    log.info('booker.slot.chosen', {
+      time: chosen.time12,
+      hole: chosen.hole,
+      holes_played: holesUsed,
+      label: chosen.rawLabel,
+    });
 
     if (opts.dryRun) {
-      log.info('booker.dry_run.stop', { would_book: chosen.time12, hole: chosen.hole });
+      log.info('booker.dry_run.stop', {
+        would_book: chosen.time12,
+        hole: chosen.hole,
+        holes_played: holesUsed,
+      });
       await screenshot(page, screenshotDir, '05-dry-run-stop');
       return;
     }
 
     await chosen.locator.click();
-    log.info('booker.slot.clicked', { time: chosen.time12 });
+    log.info('booker.slot.clicked', { time: chosen.time12, holes_played: holesUsed });
     await page.waitForLoadState('domcontentloaded').catch(() => {});
     await screenshot(page, screenshotDir, '06-after-booking-click');
-    log.info('booker.success', { booked: chosen.time12, hole: chosen.hole, date: target.iso });
+    log.info('booker.success', {
+      booked: chosen.time12,
+      hole: chosen.hole,
+      holes_played: holesUsed,
+      date: target.iso,
+    });
   } catch (err) {
     const e = err as Error;
     log.error('booker.exception', { message: e.message, stack: e.stack });
@@ -142,6 +150,44 @@ async function clickAgree(page: Page): Promise<void> {
 async function setGolfers(page: Page, golfers: number): Promise<void> {
   await page.locator('#ddlQuantity').selectOption(String(golfers));
   log.info('booker.form.staged', { golfers });
+}
+
+async function setHoles(page: Page, holes: number): Promise<void> {
+  // Best-effort: the dropdown may not exist on all pages of the flow; silently skip if missing.
+  const dd = page.locator('#ddlHoleSelection');
+  if (await dd.count() === 0) {
+    log.info('booker.holes.dropdown_absent', { holes_requested: holes });
+    return;
+  }
+  await dd.selectOption(String(holes));
+  log.info('booker.holes.set', { holes });
+}
+
+async function findEarliestInWindow(
+  page: Page,
+  opts: BookerOptions,
+  holesContext: number,
+): Promise<Slot | null> {
+  const slots = await readAvailableSlots(page);
+  log.info('booker.slots.found', {
+    holes: holesContext,
+    count: slots.length,
+    slots: slots.map(s => ({ time: s.time12, hole: s.hole })),
+  });
+
+  const inWindow = slots
+    .filter(s => s.time24 >= opts.targetTimeMin && s.time24 <= opts.targetTimeMax)
+    .sort((a, b) => a.time24.localeCompare(b.time24));
+
+  if (inWindow.length === 0) {
+    log.warn('booker.no_slots_in_window', {
+      holes: holesContext,
+      window: [opts.targetTimeMin, opts.targetTimeMax],
+      available: slots.map(s => s.time12),
+    });
+    return null;
+  }
+  return inWindow[0];
 }
 
 async function clickTargetDay(page: Page, target: CalendarDate): Promise<void> {
