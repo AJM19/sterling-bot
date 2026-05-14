@@ -180,13 +180,14 @@ export async function book(opts: BookerOptions): Promise<void> {
       return;
     }
 
-    // Click-and-verify with retry: another user may have grabbed the slot in the same
-    // few-millisecond window. If Sterling returns an error, exclude that slot from the
-    // candidates and try the next-earliest in the same tier. Up to MAX_CLICK_RETRIES.
+    // Click-and-verify with retry. We use POSITIVE success detection — Sterling's success
+    // page shows "Your tee time has been recorded ... Your confirmation number is: <N>".
+    // Anything else (race conflict, generic error, session bounce) is treated as a failure
+    // so the bot doesn't optimistically declare success on an unexpected page.
     const MAX_CLICK_RETRIES = 4;
     const tried = new Set<string>([chosen.time24]);
     let bookingSucceeded = false;
-    let lastError = '';
+    let lastBodySnippet = '';
 
     for (let retry = 0; retry <= MAX_CLICK_RETRIES; retry++) {
       const postbackPromise = page
@@ -220,10 +221,10 @@ export async function book(opts: BookerOptions): Promise<void> {
       await screenshot(page, screenshotDir, screenshotName);
 
       const bodyText = (await page.locator('body').textContent().catch(() => null)) ?? '';
-      const errorIndicators = /not available|already booked|taken|invalid|error|denied/i;
-      const matched = errorIndicators.test(bodyText);
+      const successPattern = /your tee time has been recorded|your confirmation number is/i;
+      const confirmMatch = bodyText.match(/confirmation number is:?\s*(\S+)/i);
 
-      if (!matched) {
+      if (successPattern.test(bodyText)) {
         bookingSucceeded = true;
         log.info('booker.success', {
           tier: attemptUsed.tier,
@@ -233,21 +234,18 @@ export async function book(opts: BookerOptions): Promise<void> {
           holes_played: attemptUsed.holes,
           outside_window: outsideWindow,
           date: target.iso,
+          confirmation_number: confirmMatch?.[1] ?? null,
           retries_used: retry,
         });
         break;
       }
 
-      lastError = bodyText
-        .replace(/\s+/g, ' ')
-        .match(/[^.]*?(not available|already booked|taken|invalid|error|denied)[^.]*\./i)?.[0]
-        ?.slice(0, 200) ?? '';
-
+      lastBodySnippet = bodyText.replace(/\s+/g, ' ').trim().slice(0, 300);
       log.warn('booker.slot.click_rejected', {
         tier: attemptUsed.tier,
         attempted: chosen.time12,
         retry,
-        message: lastError,
+        body_snippet: lastBodySnippet,
       });
 
       if (retry === MAX_CLICK_RETRIES) break;
@@ -282,7 +280,7 @@ export async function book(opts: BookerOptions): Promise<void> {
       log.error('booker.booking_failed', {
         tier: attemptUsed.tier,
         tried_times: Array.from(tried),
-        last_error: lastError,
+        last_body_snippet: lastBodySnippet,
         date: target.iso,
       });
     }
