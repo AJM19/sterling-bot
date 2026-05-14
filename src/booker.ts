@@ -76,13 +76,17 @@ export async function book(opts: BookerOptions): Promise<void> {
     await screenshot(page, screenshotDir, '03b-after-5am-refresh');
 
     // Three-tier attempt chain:
-    //   1) GOLFERS, HOLES, in window
-    //   2) GOLFERS - 1, HOLES, in window (skipped if GOLFERS <= 1)
-    //   3) 2 golfers, 9 holes, ANY time (final failsafe — overrides user settings)
+    //   1) GOLFERS, HOLES, primary window
+    //   2) GOLFERS - 1, HOLES, primary window (skipped if GOLFERS <= 1)
+    //   3) 2 golfers, 9 holes, FAILSAFE window (15:00–17:30, hardcoded)
+    const FAILSAFE_WINDOW_MIN = '15:00';
+    const FAILSAFE_WINDOW_MAX = '17:30';
+
     interface Attempt {
       golfers: number;
       holes: number;
-      inWindowOnly: boolean;
+      windowMin: string;
+      windowMax: string;
       screenshotName: string;
       tier: 'primary' | 'fewer_golfers' | 'failsafe_2g_9h';
     }
@@ -90,7 +94,8 @@ export async function book(opts: BookerOptions): Promise<void> {
       {
         golfers: opts.golfers,
         holes: opts.holes,
-        inWindowOnly: true,
+        windowMin: opts.targetTimeMin,
+        windowMax: opts.targetTimeMax,
         screenshotName: '04a-attempt-primary',
         tier: 'primary',
       },
@@ -99,7 +104,8 @@ export async function book(opts: BookerOptions): Promise<void> {
       attempts.push({
         golfers: opts.golfers - 1,
         holes: opts.holes,
-        inWindowOnly: true,
+        windowMin: opts.targetTimeMin,
+        windowMax: opts.targetTimeMax,
         screenshotName: '04b-attempt-fewer-golfers',
         tier: 'fewer_golfers',
       });
@@ -107,7 +113,8 @@ export async function book(opts: BookerOptions): Promise<void> {
     attempts.push({
       golfers: 2,
       holes: 9,
-      inWindowOnly: false,
+      windowMin: FAILSAFE_WINDOW_MIN,
+      windowMax: FAILSAFE_WINDOW_MAX,
       screenshotName: '04c-attempt-failsafe-2g-9h',
       tier: 'failsafe_2g_9h',
     });
@@ -120,16 +127,14 @@ export async function book(opts: BookerOptions): Promise<void> {
         tier: att.tier,
         golfers: att.golfers,
         holes: att.holes,
-        in_window_only: att.inWindowOnly,
+        window: [att.windowMin, att.windowMax],
       });
       await setGolfers(page, att.golfers);
       await setHoles(page, att.holes);
       await clickTargetDay(page, target);
       await screenshot(page, screenshotDir, att.screenshotName);
 
-      chosen = att.inWindowOnly
-        ? await findEarliestInWindow(page, opts, att.holes)
-        : await findEarliest(page, att.holes);
+      chosen = await findEarliestInWindow(page, att.windowMin, att.windowMax, att.holes);
 
       if (chosen) {
         attemptUsed = att;
@@ -338,7 +343,8 @@ async function setHoles(page: Page, holes: number): Promise<void> {
 
 async function findEarliestInWindow(
   page: Page,
-  opts: BookerOptions,
+  windowMin: string,
+  windowMax: string,
   holesContext: number,
 ): Promise<Slot | null> {
   const slots = await readAvailableSlots(page);
@@ -349,29 +355,18 @@ async function findEarliestInWindow(
   });
 
   const inWindow = slots
-    .filter(s => s.time24 >= opts.targetTimeMin && s.time24 <= opts.targetTimeMax)
+    .filter(s => s.time24 >= windowMin && s.time24 <= windowMax)
     .sort((a, b) => a.time24.localeCompare(b.time24));
 
   if (inWindow.length === 0) {
     log.warn('booker.no_slots_in_window', {
       holes: holesContext,
-      window: [opts.targetTimeMin, opts.targetTimeMax],
+      window: [windowMin, windowMax],
       available: slots.map(s => s.time12),
     });
     return null;
   }
   return inWindow[0];
-}
-
-async function findEarliest(page: Page, holesContext: number): Promise<Slot | null> {
-  const slots = await readAvailableSlots(page);
-  log.info('booker.slots.found', {
-    holes: holesContext,
-    count: slots.length,
-    slots: slots.map(s => ({ time: s.time12, hole: s.hole })),
-  });
-  if (slots.length === 0) return null;
-  return slots.slice().sort((a, b) => a.time24.localeCompare(b.time24))[0];
 }
 
 async function clickTargetDay(page: Page, target: CalendarDate): Promise<void> {
