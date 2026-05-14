@@ -31,10 +31,10 @@ Screenshots dump to `/tmp/screenshots/<run-id>/`. Inspect `05-dry-run-stop.png` 
 1. Push this repo to GitHub.
 2. In Railway: New Project → Deploy from GitHub → pick the repo.
 3. Variables tab: add `STERLING_EMAIL` and `STERLING_PASSWORD`. Leave `DRY_RUN=true` for the first weekly run.
-4. Settings → confirm the cron schedule shows `45 8 * * 6` (UTC).
+4. Settings → confirm the cron schedule shows `58 8 * * 6` (UTC).
 5. Trigger one manual deploy to verify the build succeeds.
 
-Cron fires at `45 8 * * 6` UTC = 3:45 AM EST (winter) / 4:45 AM EDT (summer). The script then idles until exactly 5:00:00 AM in `America/New_York` before firing the booking click — DST is handled by the script, not the cron schedule.
+Cron fires at `58 8 * * 6` UTC = 3:58 AM EST (winter) / 4:58 AM EDT (summer). The script then idles until exactly 5:00:00 AM in `America/New_York` before firing the booking click — DST is handled by the script, not the cron schedule.
 
 ## Going live
 

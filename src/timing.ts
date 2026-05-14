@@ -44,6 +44,21 @@ export function easternTodayAt(hour: number, minute: number, second: number): nu
   return nyWallClockToUtcMs(y, m, day, hour, minute, second);
 }
 
+export function easternHmsFromNow(msAhead: number): { hour: number; minute: number; second: number } {
+  const target = new Date(Date.now() + msAhead);
+  const fmt = new Intl.DateTimeFormat('en-US', {
+    timeZone: NY,
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+  });
+  const parts = fmt.formatToParts(target);
+  const get = (t: string) => parseInt(parts.find(p => p.type === t)!.value, 10);
+  const rawHour = get('hour');
+  return { hour: rawHour === 24 ? 0 : rawHour, minute: get('minute'), second: get('second') };
+}
+
 export async function waitUntilEastern(hour: number, minute: number, second: number, bufferMs: number): Promise<void> {
   const targetMs = easternTodayAt(hour, minute, second) + bufferMs;
   const delta = targetMs - Date.now();

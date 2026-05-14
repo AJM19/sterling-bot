@@ -35,6 +35,7 @@ async function main(): Promise<void> {
     holes: parseInt10(process.env.HOLES, 18),
     raceFireBufferMs: parseInt10(process.env.RACE_FIRE_BUFFER_MS, 50),
     overrideFireNow: parseBool(process.env.OVERRIDE_FIRE_NOW, false),
+    simulateWaitMs: process.env.SIMULATE_WAIT_MS ? parseInt10(process.env.SIMULATE_WAIT_MS, 0) : null,
     headless: parseBool(process.env.HEADLESS, true),
   };
 

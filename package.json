@@ -10,7 +10,7 @@
   "scripts": {
     "build": "tsc",
     "start": "node dist/index.js",
-    "dev": "tsx --env-file=.env src/index.ts",
+    "dev": "SIMULATE_WAIT_MS=10000 tsx --env-file=.env src/index.ts",
     "dry-run": "DRY_RUN=true OVERRIDE_FIRE_NOW=true HEADLESS=false tsx --env-file=.env src/index.ts"
   },
   "dependencies": {

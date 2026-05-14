@@ -2,7 +2,7 @@ import { chromium, Page, Locator } from 'playwright';
 import path from 'node:path';
 import fs from 'node:fs/promises';
 import { log } from './log.js';
-import { waitUntilEastern } from './timing.js';
+import { waitUntilEastern, easternHmsFromNow } from './timing.js';
 import { getNextSaturdayInEastern, CalendarDate } from './nextSaturday.js';
 
 export interface BookerOptions {
@@ -15,6 +15,7 @@ export interface BookerOptions {
   holes: number;
   raceFireBufferMs: number;
   overrideFireNow: boolean;
+  simulateWaitMs: number | null;
   headless: boolean;
 }
 
@@ -51,17 +52,30 @@ export async function book(opts: BookerOptions): Promise<void> {
     await clickAgree(page);
     await screenshot(page, screenshotDir, '02-after-agree');
 
+    // Pre-stage the form so the post-5am re-stage is fast.
     await setGolfers(page, opts.golfers);
-    await screenshot(page, screenshotDir, '03-form-staged');
+    await setHoles(page, opts.holes);
+    await screenshot(page, screenshotDir, '03-form-staged-prestage');
 
-    if (!opts.overrideFireNow) {
-      await waitUntilEastern(5, 0, 0, opts.raceFireBufferMs);
-    } else {
+    if (opts.simulateWaitMs != null) {
+      const t = easternHmsFromNow(opts.simulateWaitMs);
+      log.info('booker.wait.simulating_target', {
+        in_ms: opts.simulateWaitMs,
+        eastern_target: `${pad2(t.hour)}:${pad2(t.minute)}:${pad2(t.second)}`,
+      });
+      await waitUntilEastern(t.hour, t.minute, t.second, opts.raceFireBufferMs);
+    } else if (opts.overrideFireNow) {
       log.warn('booker.wait.bypassed', { reason: 'OVERRIDE_FIRE_NOW' });
+    } else {
+      await waitUntilEastern(5, 0, 0, opts.raceFireBufferMs);
     }
 
+    // Sterling only renders #DayNN for next Saturday once the 7-day window opens at 5:00 AM ET.
+    // Click btnDisplay until that link appears (handles minor server clock skew at the boundary).
+    await refreshAfterFireMoment(page, target);
+    await screenshot(page, screenshotDir, '03b-after-5am-refresh');
+
     // Primary attempt: user's preferred holes setting (default 18). Filter to window.
-    await setHoles(page, opts.holes);
     await clickTargetDay(page, target);
     await screenshot(page, screenshotDir, '04-time-slots-primary');
 
@@ -195,6 +209,57 @@ async function clickAgree(page: Page): Promise<void> {
   log.info('booker.agree.complete', { url: page.url() });
 }
 
+async function refreshAfterFireMoment(page: Page, target: CalendarDate): Promise<void> {
+  // Don't navigate (page.goto resets Sterling's session view). Click #btnDisplay — this is a
+  // postback that asks the server to regenerate the calendar section based on the current
+  // ddlMonth/ddlYear. Sterling decides which days are bookable at server-eval time, so a
+  // postback at 5:00:00 AM picks up the new day link automatically.
+  //
+  // Retry up to MAX_ATTEMPTS times: if Sterling's server clock is behind ours by even a few
+  // milliseconds, the first click could return a response generated at 4:59:59.x with the
+  // target day still hidden. Each subsequent retry waits RETRY_DELAY_MS so the server moves
+  // past 5:00:00 AM on its own clock.
+  const dayId = `#Day${target.dayOfMonth}`;
+  const MAX_ATTEMPTS = 5;
+  const RETRY_DELAY_MS = 400;
+
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    log.info('booker.refresh.attempt', { attempt, day_selector: dayId, url: page.url() });
+
+    const postbackPromise = page
+      .waitForResponse(
+        resp =>
+          resp.url().includes('bookingadmin.aspx') &&
+          resp.request().method() === 'POST' &&
+          resp.status() < 400,
+        { timeout: 15000 },
+      )
+      .catch(() => null);
+
+    await page.locator('#btnDisplay').click();
+    const response = await postbackPromise;
+    await page.waitForLoadState('domcontentloaded', { timeout: 5000 }).catch(() => {});
+
+    const dayCount = await page.locator(dayId).count();
+    log.info('booker.refresh.day_check', {
+      attempt,
+      postback_status: response?.status() ?? 'timeout',
+      day_link_present: dayCount > 0,
+    });
+
+    if (dayCount > 0) {
+      log.info('booker.refresh.complete', { attempts: attempt });
+      return;
+    }
+
+    if (attempt < MAX_ATTEMPTS) {
+      await new Promise(resolve => setTimeout(resolve, RETRY_DELAY_MS));
+    }
+  }
+
+  log.error('booker.refresh.exhausted_retries', { day_selector: dayId, attempts: MAX_ATTEMPTS });
+}
+
 async function setGolfers(page: Page, golfers: number): Promise<void> {
   await page.locator('#ddlQuantity').selectOption(String(golfers));
   log.info('booker.form.staged', { golfers });
@@ -322,4 +387,8 @@ async function screenshot(page: Page, dir: string, name: string): Promise<void> 
   const file = path.join(dir, `${name}.png`);
   await page.screenshot({ path: file, fullPage: true });
   log.info('booker.screenshot', { file });
+}
+
+function pad2(n: number): string {
+  return n.toString().padStart(2, '0');
 }
