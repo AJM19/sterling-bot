@@ -60,22 +60,28 @@ export async function book(opts: BookerOptions): Promise<void> {
       log.warn('booker.wait.bypassed', { reason: 'OVERRIDE_FIRE_NOW' });
     }
 
-    // Primary attempt: user's preferred holes setting (default 18).
+    // Primary attempt: user's preferred holes setting (default 18). Filter to window.
     await setHoles(page, opts.holes);
     await clickTargetDay(page, target);
     await screenshot(page, screenshotDir, '04-time-slots-primary');
 
     let chosen = await findEarliestInWindow(page, opts, opts.holes);
     let holesUsed = opts.holes;
+    let outsideWindow = false;
 
-    // Fallback: if the user wanted 18 holes and nothing's in window, try 9 holes.
+    // Fallback: if no in-window slot for primary holes count and we weren't already trying 9,
+    // switch to 9 holes and grab the EARLIEST AVAILABLE slot regardless of window.
     if (!chosen && opts.holes !== 9) {
       log.info('booker.fallback.trying_9_holes', { primary_holes: opts.holes });
       await setHoles(page, 9);
       await clickTargetDay(page, target);
       await screenshot(page, screenshotDir, '04b-time-slots-9-holes');
-      chosen = await findEarliestInWindow(page, opts, 9);
-      if (chosen) holesUsed = 9;
+      chosen = await findEarliest(page, 9);
+      if (chosen) {
+        holesUsed = 9;
+        outsideWindow =
+          chosen.time24 < opts.targetTimeMin || chosen.time24 > opts.targetTimeMax;
+      }
     }
 
     if (!chosen) {
@@ -87,6 +93,7 @@ export async function book(opts: BookerOptions): Promise<void> {
       time: chosen.time12,
       hole: chosen.hole,
       holes_played: holesUsed,
+      outside_window: outsideWindow,
       label: chosen.rawLabel,
     });
 
@@ -95,19 +102,60 @@ export async function book(opts: BookerOptions): Promise<void> {
         would_book: chosen.time12,
         hole: chosen.hole,
         holes_played: holesUsed,
+        outside_window: outsideWindow,
       });
       await screenshot(page, screenshotDir, '05-dry-run-stop');
       return;
     }
 
+    // Wait for the postback response so the screenshot captures Sterling's actual reply
+    // (confirmation page or red error), not the in-flight page.
+    const postbackPromise = page
+      .waitForResponse(
+        resp =>
+          resp.url().includes('bookingadmin.aspx') &&
+          resp.request().method() === 'POST' &&
+          resp.status() < 400,
+        { timeout: 15000 },
+      )
+      .catch(() => null);
+
     await chosen.locator.click();
     log.info('booker.slot.clicked', { time: chosen.time12, holes_played: holesUsed });
-    await page.waitForLoadState('domcontentloaded').catch(() => {});
+
+    const response = await postbackPromise;
+    if (response) {
+      log.info('booker.slot.postback_complete', { status: response.status() });
+    } else {
+      log.warn('booker.slot.postback_timeout');
+    }
+
+    await page.waitForLoadState('domcontentloaded', { timeout: 5000 }).catch(() => {});
     await screenshot(page, screenshotDir, '06-after-booking-click');
+
+    // Look for red error text Sterling shows when a booking fails (e.g. slot taken,
+    // outside window, etc.). If present, log as a failure rather than success.
+    const bodyText = (await page.locator('body').textContent().catch(() => null)) ?? '';
+    const errorIndicators = /not available|already booked|invalid|error|denied/i;
+    if (errorIndicators.test(bodyText)) {
+      const errSnippet = bodyText
+        .replace(/\s+/g, ' ')
+        .match(/[^.]*?(not available|already booked|invalid|error|denied)[^.]*\./i)?.[0]
+        ?.slice(0, 200) ?? '';
+      log.error('booker.booking_failed', {
+        attempted: chosen.time12,
+        holes_played: holesUsed,
+        date: target.iso,
+        message: errSnippet,
+      });
+      return;
+    }
+
     log.info('booker.success', {
       booked: chosen.time12,
       hole: chosen.hole,
       holes_played: holesUsed,
+      outside_window: outsideWindow,
       date: target.iso,
     });
   } catch (err) {
@@ -190,34 +238,44 @@ async function findEarliestInWindow(
   return inWindow[0];
 }
 
+async function findEarliest(page: Page, holesContext: number): Promise<Slot | null> {
+  const slots = await readAvailableSlots(page);
+  log.info('booker.slots.found', {
+    holes: holesContext,
+    count: slots.length,
+    slots: slots.map(s => ({ time: s.time12, hole: s.hole })),
+  });
+  if (slots.length === 0) return null;
+  return slots.slice().sort((a, b) => a.time24.localeCompare(b.time24))[0];
+}
+
 async function clickTargetDay(page: Page, target: CalendarDate): Promise<void> {
   const dayId = `#Day${target.dayOfMonth}`;
   log.info('booker.day.click_target', { day_selector: dayId, iso: target.iso });
 
-  // The day cell is <a id="DayNN" href="javascript:__doPostBack('DayNN','')">. The href
-  // is a synthetic javascript: URL, so we must dispatch a real click (which lets Playwright
-  // run the JS handler and submit the postback form).
+  // Wait for the ASP.NET postback to complete (rather than checking the DOM, which can return
+  // stale "Compare..." slot links from a previous click before the new HTML lands).
+  const postbackPromise = page
+    .waitForResponse(
+      resp =>
+        resp.url().includes('bookingadmin.aspx') &&
+        resp.request().method() === 'POST' &&
+        resp.status() < 400,
+      { timeout: 15000 },
+    )
+    .catch(() => null);
+
   await page.locator(dayId).click();
   log.info('booker.day.clicked', { day: target.dayOfMonth });
 
-  // The postback returns a full page replacement. Wait for any slot link matching the pattern
-  // to appear, since the postback may not trigger a top-level navigation event.
-  const slotPattern = /\d{1,2}:\d{2}\s*(am|pm)\s+Hole-\d+/i;
-  try {
-    await page.waitForFunction(
-      (re: string) => {
-        const rx = new RegExp(re, 'i');
-        return Array.from(document.querySelectorAll('a')).some(a => rx.test((a.textContent || '').trim()));
-      },
-      slotPattern.source,
-      { timeout: 15000 }
-    );
-    log.info('booker.day.slot_list_rendered');
-  } catch {
-    log.warn('booker.day.slot_list_timeout');
+  const response = await postbackPromise;
+  if (response) {
+    log.info('booker.day.postback_complete', { status: response.status() });
+  } else {
+    log.warn('booker.day.postback_timeout');
   }
 
-  await page.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => {});
+  await page.waitForLoadState('domcontentloaded', { timeout: 5000 }).catch(() => {});
 }
 
 async function readAvailableSlots(page: Page): Promise<Slot[]> {
