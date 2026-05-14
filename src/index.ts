@@ -12,6 +12,13 @@ function parseInt10(s: string | undefined, def: number): number {
   return Number.isNaN(n) ? def : n;
 }
 
+function normalizeTime(s: string | undefined, def: string): string {
+  if (!s) return def;
+  const match = s.trim().match(/^(\d{1,2}):(\d{2})$/);
+  if (!match) return def;
+  return `${match[1].padStart(2, '0')}:${match[2]}`;
+}
+
 async function main(): Promise<void> {
   const email = process.env.STERLING_EMAIL;
   const password = process.env.STERLING_PASSWORD;
@@ -29,8 +36,8 @@ async function main(): Promise<void> {
     email,
     password,
     dryRun: parseBool(process.env.DRY_RUN, true),
-    targetTimeMin: process.env.TARGET_TIME_MIN ?? '10:00',
-    targetTimeMax: process.env.TARGET_TIME_MAX ?? '15:00',
+    targetTimeMin: normalizeTime(process.env.TARGET_TIME_MIN, '10:00'),
+    targetTimeMax: normalizeTime(process.env.TARGET_TIME_MAX, '15:00'),
     golfers: parseInt10(process.env.GOLFERS, 2),
     holes: parseInt10(process.env.HOLES, 18),
     raceFireBufferMs: parseInt10(process.env.RACE_FIRE_BUFFER_MS, 50),
