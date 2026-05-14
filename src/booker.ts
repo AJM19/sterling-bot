@@ -180,63 +180,112 @@ export async function book(opts: BookerOptions): Promise<void> {
       return;
     }
 
-    // Wait for the postback response so the screenshot captures Sterling's actual reply
-    // (confirmation page or red error), not the in-flight page.
-    const postbackPromise = page
-      .waitForResponse(
-        resp =>
-          resp.url().includes('bookingadmin.aspx') &&
-          resp.request().method() === 'POST' &&
-          resp.status() < 400,
-        { timeout: 15000 },
-      )
-      .catch(() => null);
+    // Click-and-verify with retry: another user may have grabbed the slot in the same
+    // few-millisecond window. If Sterling returns an error, exclude that slot from the
+    // candidates and try the next-earliest in the same tier. Up to MAX_CLICK_RETRIES.
+    const MAX_CLICK_RETRIES = 4;
+    const tried = new Set<string>([chosen.time24]);
+    let bookingSucceeded = false;
+    let lastError = '';
 
-    await chosen.locator.click();
-    log.info('booker.slot.clicked', {
-      tier: attemptUsed.tier,
-      time: chosen.time12,
-      golfers_played: attemptUsed.golfers,
-      holes_played: attemptUsed.holes,
-    });
+    for (let retry = 0; retry <= MAX_CLICK_RETRIES; retry++) {
+      const postbackPromise = page
+        .waitForResponse(
+          resp =>
+            resp.url().includes('bookingadmin.aspx') &&
+            resp.request().method() === 'POST' &&
+            resp.status() < 400,
+          { timeout: 15000 },
+        )
+        .catch(() => null);
 
-    const response = await postbackPromise;
-    if (response) {
-      log.info('booker.slot.postback_complete', { status: response.status() });
-    } else {
-      log.warn('booker.slot.postback_timeout');
-    }
-
-    await page.waitForLoadState('domcontentloaded', { timeout: 5000 }).catch(() => {});
-    await screenshot(page, screenshotDir, '06-after-booking-click');
-
-    const bodyText = (await page.locator('body').textContent().catch(() => null)) ?? '';
-    const errorIndicators = /not available|already booked|invalid|error|denied/i;
-    if (errorIndicators.test(bodyText)) {
-      const errSnippet = bodyText
-        .replace(/\s+/g, ' ')
-        .match(/[^.]*?(not available|already booked|invalid|error|denied)[^.]*\./i)?.[0]
-        ?.slice(0, 200) ?? '';
-      log.error('booker.booking_failed', {
+      await chosen.locator.click();
+      log.info('booker.slot.clicked', {
         tier: attemptUsed.tier,
-        attempted: chosen.time12,
+        time: chosen.time12,
+        retry,
         golfers_played: attemptUsed.golfers,
         holes_played: attemptUsed.holes,
-        date: target.iso,
-        message: errSnippet,
       });
-      return;
+
+      const response = await postbackPromise;
+      if (response) {
+        log.info('booker.slot.postback_complete', { status: response.status(), retry });
+      } else {
+        log.warn('booker.slot.postback_timeout', { retry });
+      }
+
+      await page.waitForLoadState('domcontentloaded', { timeout: 5000 }).catch(() => {});
+      const screenshotName = retry === 0 ? '06-after-booking-click' : `06-after-booking-click-retry-${retry}`;
+      await screenshot(page, screenshotDir, screenshotName);
+
+      const bodyText = (await page.locator('body').textContent().catch(() => null)) ?? '';
+      const errorIndicators = /not available|already booked|taken|invalid|error|denied/i;
+      const matched = errorIndicators.test(bodyText);
+
+      if (!matched) {
+        bookingSucceeded = true;
+        log.info('booker.success', {
+          tier: attemptUsed.tier,
+          booked: chosen.time12,
+          hole: chosen.hole,
+          golfers_played: attemptUsed.golfers,
+          holes_played: attemptUsed.holes,
+          outside_window: outsideWindow,
+          date: target.iso,
+          retries_used: retry,
+        });
+        break;
+      }
+
+      lastError = bodyText
+        .replace(/\s+/g, ' ')
+        .match(/[^.]*?(not available|already booked|taken|invalid|error|denied)[^.]*\./i)?.[0]
+        ?.slice(0, 200) ?? '';
+
+      log.warn('booker.slot.click_rejected', {
+        tier: attemptUsed.tier,
+        attempted: chosen.time12,
+        retry,
+        message: lastError,
+      });
+
+      if (retry === MAX_CLICK_RETRIES) break;
+
+      // Re-fetch the slot list (the rejected slot is presumably no longer available).
+      // Pick the next earliest IN THE SAME TIER WINDOW that we haven't tried yet.
+      await clickTargetDay(page, target);
+      const fresh = await readAvailableSlots(page);
+      const remaining = fresh
+        .filter(s => !tried.has(s.time24))
+        .filter(s => s.time24 >= attemptUsed!.windowMin && s.time24 <= attemptUsed!.windowMax)
+        .sort((a, b) => a.time24.localeCompare(b.time24));
+
+      if (remaining.length === 0) {
+        log.warn('booker.slot.no_more_candidates', {
+          tier: attemptUsed.tier,
+          tried: Array.from(tried),
+        });
+        break;
+      }
+
+      chosen = remaining[0];
+      tried.add(chosen.time24);
+      log.info('booker.slot.retry_picked', {
+        tier: attemptUsed.tier,
+        time: chosen.time12,
+        retry: retry + 1,
+      });
     }
 
-    log.info('booker.success', {
-      tier: attemptUsed.tier,
-      booked: chosen.time12,
-      hole: chosen.hole,
-      golfers_played: attemptUsed.golfers,
-      holes_played: attemptUsed.holes,
-      outside_window: outsideWindow,
-      date: target.iso,
-    });
+    if (!bookingSucceeded) {
+      log.error('booker.booking_failed', {
+        tier: attemptUsed.tier,
+        tried_times: Array.from(tried),
+        last_error: lastError,
+        date: target.iso,
+      });
+    }
   } catch (err) {
     const e = err as Error;
     log.error('booker.exception', { message: e.message, stack: e.stack });
