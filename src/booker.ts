@@ -75,47 +75,100 @@ export async function book(opts: BookerOptions): Promise<void> {
     await refreshAfterFireMoment(page, target);
     await screenshot(page, screenshotDir, '03b-after-5am-refresh');
 
-    // Primary attempt: user's preferred holes setting (default 18). Filter to window.
-    await clickTargetDay(page, target);
-    await screenshot(page, screenshotDir, '04-time-slots-primary');
+    // Three-tier attempt chain:
+    //   1) GOLFERS, HOLES, in window
+    //   2) GOLFERS - 1, HOLES, in window (skipped if GOLFERS <= 1)
+    //   3) 2 golfers, 9 holes, ANY time (final failsafe — overrides user settings)
+    interface Attempt {
+      golfers: number;
+      holes: number;
+      inWindowOnly: boolean;
+      screenshotName: string;
+      tier: 'primary' | 'fewer_golfers' | 'failsafe_2g_9h';
+    }
+    const attempts: Attempt[] = [
+      {
+        golfers: opts.golfers,
+        holes: opts.holes,
+        inWindowOnly: true,
+        screenshotName: '04a-attempt-primary',
+        tier: 'primary',
+      },
+    ];
+    if (opts.golfers > 1) {
+      attempts.push({
+        golfers: opts.golfers - 1,
+        holes: opts.holes,
+        inWindowOnly: true,
+        screenshotName: '04b-attempt-fewer-golfers',
+        tier: 'fewer_golfers',
+      });
+    }
+    attempts.push({
+      golfers: 2,
+      holes: 9,
+      inWindowOnly: false,
+      screenshotName: '04c-attempt-failsafe-2g-9h',
+      tier: 'failsafe_2g_9h',
+    });
 
-    let chosen = await findEarliestInWindow(page, opts, opts.holes);
-    let holesUsed = opts.holes;
-    let outsideWindow = false;
+    let chosen: Slot | null = null;
+    let attemptUsed: Attempt | null = null;
 
-    // Fallback: if no in-window slot for primary holes count and we weren't already trying 9,
-    // switch to 9 holes and grab the EARLIEST AVAILABLE slot regardless of window.
-    if (!chosen && opts.holes !== 9) {
-      log.info('booker.fallback.trying_9_holes', { primary_holes: opts.holes });
-      await setHoles(page, 9);
+    for (const att of attempts) {
+      log.info('booker.attempt.starting', {
+        tier: att.tier,
+        golfers: att.golfers,
+        holes: att.holes,
+        in_window_only: att.inWindowOnly,
+      });
+      await setGolfers(page, att.golfers);
+      await setHoles(page, att.holes);
       await clickTargetDay(page, target);
-      await screenshot(page, screenshotDir, '04b-time-slots-9-holes');
-      chosen = await findEarliest(page, 9);
+      await screenshot(page, screenshotDir, att.screenshotName);
+
+      chosen = att.inWindowOnly
+        ? await findEarliestInWindow(page, opts, att.holes)
+        : await findEarliest(page, att.holes);
+
       if (chosen) {
-        holesUsed = 9;
-        outsideWindow =
-          chosen.time24 < opts.targetTimeMin || chosen.time24 > opts.targetTimeMax;
+        attemptUsed = att;
+        log.info('booker.attempt.matched', {
+          tier: att.tier,
+          golfers: att.golfers,
+          holes: att.holes,
+          time: chosen.time12,
+        });
+        break;
       }
+      log.warn('booker.attempt.no_match', { tier: att.tier });
     }
 
-    if (!chosen) {
-      log.warn('booker.no_slots_any_holes', { window: [opts.targetTimeMin, opts.targetTimeMax] });
+    if (!chosen || !attemptUsed) {
+      log.warn('booker.no_slots_any_attempt', { window: [opts.targetTimeMin, opts.targetTimeMax] });
       return;
     }
 
+    const outsideWindow =
+      chosen.time24 < opts.targetTimeMin || chosen.time24 > opts.targetTimeMax;
+
     log.info('booker.slot.chosen', {
+      tier: attemptUsed.tier,
       time: chosen.time12,
       hole: chosen.hole,
-      holes_played: holesUsed,
+      golfers_played: attemptUsed.golfers,
+      holes_played: attemptUsed.holes,
       outside_window: outsideWindow,
       label: chosen.rawLabel,
     });
 
     if (opts.dryRun) {
       log.info('booker.dry_run.stop', {
+        tier: attemptUsed.tier,
         would_book: chosen.time12,
         hole: chosen.hole,
-        holes_played: holesUsed,
+        golfers_played: attemptUsed.golfers,
+        holes_played: attemptUsed.holes,
         outside_window: outsideWindow,
       });
       await screenshot(page, screenshotDir, '05-dry-run-stop');
@@ -135,7 +188,12 @@ export async function book(opts: BookerOptions): Promise<void> {
       .catch(() => null);
 
     await chosen.locator.click();
-    log.info('booker.slot.clicked', { time: chosen.time12, holes_played: holesUsed });
+    log.info('booker.slot.clicked', {
+      tier: attemptUsed.tier,
+      time: chosen.time12,
+      golfers_played: attemptUsed.golfers,
+      holes_played: attemptUsed.holes,
+    });
 
     const response = await postbackPromise;
     if (response) {
@@ -147,8 +205,6 @@ export async function book(opts: BookerOptions): Promise<void> {
     await page.waitForLoadState('domcontentloaded', { timeout: 5000 }).catch(() => {});
     await screenshot(page, screenshotDir, '06-after-booking-click');
 
-    // Look for red error text Sterling shows when a booking fails (e.g. slot taken,
-    // outside window, etc.). If present, log as a failure rather than success.
     const bodyText = (await page.locator('body').textContent().catch(() => null)) ?? '';
     const errorIndicators = /not available|already booked|invalid|error|denied/i;
     if (errorIndicators.test(bodyText)) {
@@ -157,8 +213,10 @@ export async function book(opts: BookerOptions): Promise<void> {
         .match(/[^.]*?(not available|already booked|invalid|error|denied)[^.]*\./i)?.[0]
         ?.slice(0, 200) ?? '';
       log.error('booker.booking_failed', {
+        tier: attemptUsed.tier,
         attempted: chosen.time12,
-        holes_played: holesUsed,
+        golfers_played: attemptUsed.golfers,
+        holes_played: attemptUsed.holes,
         date: target.iso,
         message: errSnippet,
       });
@@ -166,9 +224,11 @@ export async function book(opts: BookerOptions): Promise<void> {
     }
 
     log.info('booker.success', {
+      tier: attemptUsed.tier,
       booked: chosen.time12,
       hole: chosen.hole,
-      holes_played: holesUsed,
+      golfers_played: attemptUsed.golfers,
+      holes_played: attemptUsed.holes,
       outside_window: outsideWindow,
       date: target.iso,
     });
