@@ -3,7 +3,7 @@ import path from 'node:path';
 import fs from 'node:fs/promises';
 import { log } from './log.js';
 import { waitUntilEastern, easternHmsFromNow } from './timing.js';
-import { getNextSaturdayInEastern, CalendarDate } from './nextSaturday.js';
+import { getTargetDateInEastern, CalendarDate } from './targetDate.js';
 
 export interface BookerOptions {
   email: string;
@@ -42,7 +42,7 @@ export async function book(opts: BookerOptions): Promise<void> {
   });
   const page = await context.newPage();
 
-  const target = getNextSaturdayInEastern();
+  const target = getTargetDateInEastern();
   log.info('booker.target_date', { ...target });
 
   try {
