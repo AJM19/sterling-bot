@@ -56,6 +56,18 @@ async function main(): Promise<void> {
     headless: opts.headless,
   });
 
+  // Sanity: an inverted or empty window is almost always a 12h/24h mixup
+  // (e.g. "02:30" meaning 2:30 PM instead of 14:30). Refuse to run rather than
+  // letting the booker walk into a guaranteed-no-match state.
+  if (opts.targetTimeMax <= opts.targetTimeMin) {
+    log.error('boot.invalid_window', {
+      target_time_min: opts.targetTimeMin,
+      target_time_max: opts.targetTimeMax,
+      hint: 'TARGET_TIME_MAX must be > TARGET_TIME_MIN, in 24-hour HH:MM. 2:30 PM is 14:30, not 02:30.',
+    });
+    process.exit(1);
+  }
+
   await book(opts);
   log.info('boot.complete');
 }

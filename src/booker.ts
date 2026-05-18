@@ -75,20 +75,17 @@ export async function book(opts: BookerOptions): Promise<void> {
     await refreshAfterFireMoment(page, target);
     await screenshot(page, screenshotDir, '03b-after-5am-refresh');
 
-    // Three-tier attempt chain:
+    // Two-tier attempt chain:
     //   1) GOLFERS, HOLES, primary window
     //   2) GOLFERS - 1, HOLES, primary window (skipped if GOLFERS <= 1)
-    //   3) 2 golfers, 9 holes, FAILSAFE window (15:00–17:30, hardcoded)
-    const FAILSAFE_WINDOW_MIN = '15:00';
-    const FAILSAFE_WINDOW_MAX = '17:30';
-
+    // If neither matches, the bot exits without booking. No more 9-hole failsafe.
     interface Attempt {
       golfers: number;
       holes: number;
       windowMin: string;
       windowMax: string;
       screenshotName: string;
-      tier: 'primary' | 'fewer_golfers' | 'failsafe_2g_9h';
+      tier: 'primary' | 'fewer_golfers';
     }
     const attempts: Attempt[] = [
       {
@@ -110,14 +107,6 @@ export async function book(opts: BookerOptions): Promise<void> {
         tier: 'fewer_golfers',
       });
     }
-    attempts.push({
-      golfers: 2,
-      holes: 9,
-      windowMin: FAILSAFE_WINDOW_MIN,
-      windowMax: FAILSAFE_WINDOW_MAX,
-      screenshotName: '04c-attempt-failsafe-2g-9h',
-      tier: 'failsafe_2g_9h',
-    });
 
     let chosen: Slot | null = null;
     let attemptUsed: Attempt | null = null;
