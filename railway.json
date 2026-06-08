@@ -6,6 +6,7 @@
   },
   "deploy": {
     "startCommand": "node dist/index.js",
+    "cronSchedule": "50 8 * * 6",
     "restartPolicyType": "NEVER"
   }
 }
