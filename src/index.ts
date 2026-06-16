@@ -32,8 +32,8 @@ async function main(): Promise<void> {
     return;
   }
 
-  // Tuesday runs target a tight evening window (5:20–5:30 PM ET) regardless of
-  // TARGET_TIME_MIN/MAX env vars. All other days use the env-configured window.
+  // Tuesday runs override env config: 3 golfers, 5:20–5:30 PM ET window.
+  // All other days use the env-configured values.
   const nyWeekday = new Intl.DateTimeFormat('en-US', {
     timeZone: 'America/New_York',
     weekday: 'short',
@@ -46,7 +46,7 @@ async function main(): Promise<void> {
     dryRun: parseBool(process.env.DRY_RUN, true),
     targetTimeMin: tuesdayOverride ? '17:20' : normalizeTime(process.env.TARGET_TIME_MIN, '10:00'),
     targetTimeMax: tuesdayOverride ? '17:30' : normalizeTime(process.env.TARGET_TIME_MAX, '15:00'),
-    golfers: parseInt10(process.env.GOLFERS, 2),
+    golfers: tuesdayOverride ? 3 : parseInt10(process.env.GOLFERS, 2),
     holes: parseInt10(process.env.HOLES, 18),
     raceFireBufferMs: parseInt10(process.env.RACE_FIRE_BUFFER_MS, 50),
     overrideFireNow: parseBool(process.env.OVERRIDE_FIRE_NOW, false),
