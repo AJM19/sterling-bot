@@ -32,12 +32,20 @@ async function main(): Promise<void> {
     return;
   }
 
+  // Tuesday runs target a tight evening window (5:20–5:30 PM ET) regardless of
+  // TARGET_TIME_MIN/MAX env vars. All other days use the env-configured window.
+  const nyWeekday = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/New_York',
+    weekday: 'short',
+  }).format(new Date());
+  const tuesdayOverride = nyWeekday === 'Tue';
+
   const opts: BookerOptions = {
     email,
     password,
     dryRun: parseBool(process.env.DRY_RUN, true),
-    targetTimeMin: normalizeTime(process.env.TARGET_TIME_MIN, '10:00'),
-    targetTimeMax: normalizeTime(process.env.TARGET_TIME_MAX, '15:00'),
+    targetTimeMin: tuesdayOverride ? '17:20' : normalizeTime(process.env.TARGET_TIME_MIN, '10:00'),
+    targetTimeMax: tuesdayOverride ? '17:30' : normalizeTime(process.env.TARGET_TIME_MAX, '15:00'),
     golfers: parseInt10(process.env.GOLFERS, 2),
     holes: parseInt10(process.env.HOLES, 18),
     raceFireBufferMs: parseInt10(process.env.RACE_FIRE_BUFFER_MS, 50),
@@ -48,6 +56,8 @@ async function main(): Promise<void> {
 
   log.info('boot.config', {
     dry_run: opts.dryRun,
+    ny_weekday: nyWeekday,
+    tuesday_override: tuesdayOverride,
     target_window: [opts.targetTimeMin, opts.targetTimeMax],
     golfers: opts.golfers,
     holes: opts.holes,
