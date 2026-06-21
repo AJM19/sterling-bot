@@ -75,17 +75,15 @@ export async function book(opts: BookerOptions): Promise<void> {
     await refreshAfterFireMoment(page, target);
     await screenshot(page, screenshotDir, '03b-after-5am-refresh');
 
-    // Two-tier attempt chain:
-    //   1) GOLFERS, HOLES, primary window
-    //   2) GOLFERS - 1, HOLES, primary window (skipped if GOLFERS <= 1)
-    // If neither matches, the bot exits without booking. No more 9-hole failsafe.
+    // Single-tier attempt: configured golfers + holes against the configured window.
+    // If no slot matches, the bot exits without booking.
     interface Attempt {
       golfers: number;
       holes: number;
       windowMin: string;
       windowMax: string;
       screenshotName: string;
-      tier: 'primary' | 'fewer_golfers';
+      tier: 'primary';
     }
     const attempts: Attempt[] = [
       {
@@ -97,16 +95,6 @@ export async function book(opts: BookerOptions): Promise<void> {
         tier: 'primary',
       },
     ];
-    if (opts.golfers > 1) {
-      attempts.push({
-        golfers: opts.golfers - 1,
-        holes: opts.holes,
-        windowMin: opts.targetTimeMin,
-        windowMax: opts.targetTimeMax,
-        screenshotName: '04b-attempt-fewer-golfers',
-        tier: 'fewer_golfers',
-      });
-    }
 
     let chosen: Slot | null = null;
     let attemptUsed: Attempt | null = null;
@@ -122,6 +110,11 @@ export async function book(opts: BookerOptions): Promise<void> {
       await setHoles(page, att.holes);
       await clickTargetDay(page, target);
       await screenshot(page, screenshotDir, att.screenshotName);
+
+      // Defend against Sterling rendering a partial slot list when our click lands
+      // at exactly 5:00:00.x ET. If the count is suspiciously small, re-click the
+      // day after a short pause and re-read.
+      await waitForFullSlotList(page, target);
 
       chosen = await findEarliestInWindow(page, att.windowMin, att.windowMax, att.holes);
 
@@ -403,6 +396,32 @@ async function findEarliestInWindow(
     return null;
   }
   return inWindow[0];
+}
+
+// Sterling sometimes returns a partially-populated slot list when our day click lands at
+// exactly 5:00:00 AM ET (server still rendering). If the first read is suspiciously sparse,
+// re-click the day after a short pause and re-read. Accepts whatever final count after
+// MAX_SPARSE_RETRIES retries — the day might genuinely be quiet.
+async function waitForFullSlotList(page: Page, target: CalendarDate): Promise<void> {
+  const MIN_PLAUSIBLE_SLOTS = 5;
+  const RETRY_DELAY_MS = 600;
+  const MAX_SPARSE_RETRIES = 3;
+
+  let count = (await readAvailableSlots(page)).length;
+  if (count >= MIN_PLAUSIBLE_SLOTS) return;
+
+  for (let attempt = 1; attempt <= MAX_SPARSE_RETRIES; attempt++) {
+    log.info('booker.slots.sparse_retry', { attempt, count, threshold: MIN_PLAUSIBLE_SLOTS });
+    await new Promise(resolve => setTimeout(resolve, RETRY_DELAY_MS));
+    await clickTargetDay(page, target);
+    count = (await readAvailableSlots(page)).length;
+    if (count >= MIN_PLAUSIBLE_SLOTS) return;
+  }
+
+  log.warn('booker.slots.sparse_retry_exhausted', {
+    final_count: count,
+    threshold: MIN_PLAUSIBLE_SLOTS,
+  });
 }
 
 async function clickTargetDay(page: Page, target: CalendarDate): Promise<void> {
