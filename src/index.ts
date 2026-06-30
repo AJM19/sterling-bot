@@ -32,7 +32,7 @@ async function main(): Promise<void> {
     return;
   }
 
-  // Tuesday runs override env config: 3 golfers, 9 holes, 5:20–5:30 PM ET window.
+  // Tuesday runs override env config: 3 golfers, 9 holes, 5:30–5:40 PM ET window.
   // All other days use the env-configured values.
   const nyWeekday = new Intl.DateTimeFormat('en-US', {
     timeZone: 'America/New_York',
@@ -44,8 +44,8 @@ async function main(): Promise<void> {
     email,
     password,
     dryRun: parseBool(process.env.DRY_RUN, true),
-    targetTimeMin: tuesdayOverride ? '17:20' : normalizeTime(process.env.TARGET_TIME_MIN, '10:00'),
-    targetTimeMax: tuesdayOverride ? '17:30' : normalizeTime(process.env.TARGET_TIME_MAX, '15:00'),
+    targetTimeMin: tuesdayOverride ? '17:30' : normalizeTime(process.env.TARGET_TIME_MIN, '10:00'),
+    targetTimeMax: tuesdayOverride ? '17:40' : normalizeTime(process.env.TARGET_TIME_MAX, '15:00'),
     golfers: tuesdayOverride ? 3 : parseInt10(process.env.GOLFERS, 2),
     holes: tuesdayOverride ? 9 : parseInt10(process.env.HOLES, 18),
     raceFireBufferMs: parseInt10(process.env.RACE_FIRE_BUFFER_MS, 50),
