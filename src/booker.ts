@@ -405,7 +405,7 @@ async function findEarliestInWindow(
 async function waitForFullSlotList(page: Page, target: CalendarDate): Promise<void> {
   const MIN_PLAUSIBLE_SLOTS = 5;
   const RETRY_DELAY_MS = 600;
-  const MAX_SPARSE_RETRIES = 3;
+  const MAX_SPARSE_RETRIES = 5;
 
   let count = (await readAvailableSlots(page)).length;
   if (count >= MIN_PLAUSIBLE_SLOTS) return;
