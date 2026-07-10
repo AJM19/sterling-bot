@@ -403,7 +403,7 @@ async function findEarliestInWindow(
 // re-click the day after a short pause and re-read. Accepts whatever final count after
 // MAX_SPARSE_RETRIES retries — the day might genuinely be quiet.
 async function waitForFullSlotList(page: Page, target: CalendarDate): Promise<void> {
-  const MIN_PLAUSIBLE_SLOTS = 10;
+  const MIN_PLAUSIBLE_SLOTS = 5;
   const RETRY_DELAY_MS = 600;
   const MAX_SPARSE_RETRIES = 3;
 
