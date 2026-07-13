@@ -32,22 +32,22 @@ async function main(): Promise<void> {
     return;
   }
 
-  // Tuesday runs override env config: 3 golfers, 9 holes, 5:30–5:40 PM ET window.
+  // Wednesday runs override env config: 3 golfers, 9 holes, 5:30–5:40 PM ET window.
   // All other days use the env-configured values.
   const nyWeekday = new Intl.DateTimeFormat('en-US', {
     timeZone: 'America/New_York',
     weekday: 'short',
   }).format(new Date());
-  const tuesdayOverride = nyWeekday === 'Tue';
+  const wednesdayOverride = nyWeekday === 'Wed';
 
   const opts: BookerOptions = {
     email,
     password,
     dryRun: parseBool(process.env.DRY_RUN, true),
-    targetTimeMin: tuesdayOverride ? '17:30' : normalizeTime(process.env.TARGET_TIME_MIN, '10:00'),
-    targetTimeMax: tuesdayOverride ? '17:40' : normalizeTime(process.env.TARGET_TIME_MAX, '15:00'),
-    golfers: tuesdayOverride ? 3 : parseInt10(process.env.GOLFERS, 2),
-    holes: tuesdayOverride ? 9 : parseInt10(process.env.HOLES, 18),
+    targetTimeMin: wednesdayOverride ? '17:30' : normalizeTime(process.env.TARGET_TIME_MIN, '10:00'),
+    targetTimeMax: wednesdayOverride ? '17:40' : normalizeTime(process.env.TARGET_TIME_MAX, '15:00'),
+    golfers: wednesdayOverride ? 3 : parseInt10(process.env.GOLFERS, 2),
+    holes: wednesdayOverride ? 9 : parseInt10(process.env.HOLES, 18),
     raceFireBufferMs: parseInt10(process.env.RACE_FIRE_BUFFER_MS, 50),
     overrideFireNow: parseBool(process.env.OVERRIDE_FIRE_NOW, false),
     simulateWaitMs: process.env.SIMULATE_WAIT_MS ? parseInt10(process.env.SIMULATE_WAIT_MS, 0) : null,
@@ -57,7 +57,7 @@ async function main(): Promise<void> {
   log.info('boot.config', {
     dry_run: opts.dryRun,
     ny_weekday: nyWeekday,
-    tuesday_override: tuesdayOverride,
+    wednesday_override: wednesdayOverride,
     target_window: [opts.targetTimeMin, opts.targetTimeMax],
     golfers: opts.golfers,
     holes: opts.holes,
