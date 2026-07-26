@@ -1,4 +1,4 @@
-import { chromium, Page, Locator } from 'playwright';
+import { chromium, Page, Locator, Response } from 'playwright';
 import path from 'node:path';
 import fs from 'node:fs/promises';
 import { log } from './log.js';
@@ -317,22 +317,16 @@ async function refreshAfterFireMoment(page: Page, target: CalendarDate): Promise
   const MAX_ATTEMPTS = 5;
   const RETRY_DELAY_MS = 400;
 
+  // If the target date rolls into a month the calendar isn't currently showing (e.g. the last
+  // Saturday of July targeting the first Saturday of August), the calendar defaults to the
+  // current month. #DayNN would then be absent or — worse — point at the current month's day NN.
+  // Switch ddlMonth/ddlYear to the target month and re-render before we look for the day link.
+  await ensureCalendarMonth(page, target);
+
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
     log.info('booker.refresh.attempt', { attempt, day_selector: dayId, url: page.url() });
 
-    const postbackPromise = page
-      .waitForResponse(
-        resp =>
-          resp.url().includes('bookingadmin.aspx') &&
-          resp.request().method() === 'POST' &&
-          resp.status() < 400,
-        { timeout: 15000 },
-      )
-      .catch(() => null);
-
-    await page.locator('#btnDisplay').click();
-    const response = await postbackPromise;
-    await page.waitForLoadState('domcontentloaded', { timeout: 5000 }).catch(() => {});
+    const response = await clickDisplay(page);
 
     const dayCount = await page.locator(dayId).count();
     log.info('booker.refresh.day_check', {
@@ -352,6 +346,142 @@ async function refreshAfterFireMoment(page: Page, target: CalendarDate): Promise
   }
 
   log.error('booker.refresh.exhausted_retries', { day_selector: dayId, attempts: MAX_ATTEMPTS });
+}
+
+// Postback #btnDisplay and wait for Sterling to regenerate the calendar section. Shared by the
+// post-5am refresh loop and the month-navigation step so both wait on the same ASP.NET postback.
+async function clickDisplay(page: Page): Promise<Response | null> {
+  const postbackPromise = page
+    .waitForResponse(
+      resp =>
+        resp.url().includes('bookingadmin.aspx') &&
+        resp.request().method() === 'POST' &&
+        resp.status() < 400,
+      { timeout: 15000 },
+    )
+    .catch(() => null);
+
+  await page.locator('#btnDisplay').click();
+  const response = await postbackPromise;
+  await page.waitForLoadState('domcontentloaded', { timeout: 5000 }).catch(() => {});
+  return response;
+}
+
+const MONTH_NAMES = [
+  'January', 'February', 'March', 'April', 'May', 'June',
+  'July', 'August', 'September', 'October', 'November', 'December',
+];
+
+// Map an option label ("July", "Jul", "7", "07") to a 1-12 month number, or null if it's not one.
+function monthFromText(text: string): number | null {
+  const t = text.trim().toLowerCase();
+  if (!t) return null;
+  const named = MONTH_NAMES.findIndex(
+    m => m.toLowerCase() === t || m.toLowerCase().slice(0, 3) === t.slice(0, 3),
+  );
+  if (named >= 0) return named + 1;
+  const n = parseInt(t, 10);
+  if (!Number.isNaN(n) && n >= 1 && n <= 12) return n;
+  return null;
+}
+
+// Read the visible label of the currently-selected option of a <select>, or null if it's absent.
+async function selectedOptionText(page: Page, selector: string): Promise<string | null> {
+  const sel = page.locator(selector);
+  if ((await sel.count()) === 0) return null;
+  return sel
+    .evaluate((el: HTMLSelectElement) => el.options[el.selectedIndex]?.text ?? el.value ?? '')
+    .catch(() => null);
+}
+
+// Choose the ddlMonth option for `month`, coping with the assorted ways Sterling could value it:
+// visible month name, numeric label, or a numeric value that's either 1-based or 0-based.
+async function selectMonthOption(page: Page, month: number): Promise<boolean> {
+  const sel = page.locator('#ddlMonth');
+  const options = await sel
+    .locator('option')
+    .evaluateAll(els =>
+      (els as HTMLOptionElement[]).map(el => ({ value: el.value, text: (el.textContent || '').trim() })),
+    );
+  if (options.length === 0) return false;
+
+  // 1) Match on the visible label (month name or numeric) — unambiguous across numbering schemes.
+  let match = options.find(o => monthFromText(o.text) === month);
+
+  // 2) Fall back to the option value, detecting 0- vs 1-based numbering from the full option set.
+  if (!match) {
+    const numeric = options.map(o => parseInt(o.value, 10));
+    if (numeric.every(n => !Number.isNaN(n))) {
+      const zeroBased = Math.min(...numeric) === 0;
+      const wanted = zeroBased ? month - 1 : month;
+      match = options.find(o => parseInt(o.value, 10) === wanted);
+    }
+  }
+
+  if (!match) return false;
+  await sel.selectOption({ value: match.value });
+  return true;
+}
+
+// Choose the ddlYear option for `year`. The year dropdown is optional — return false if absent
+// or if no option matches (e.g. Sterling folds the year into the month label).
+async function selectYearOption(page: Page, year: number): Promise<boolean> {
+  const sel = page.locator('#ddlYear');
+  if ((await sel.count()) === 0) return false;
+  const options = await sel
+    .locator('option')
+    .evaluateAll(els =>
+      (els as HTMLOptionElement[]).map(el => ({ value: el.value, text: (el.textContent || '').trim() })),
+    );
+  const match =
+    options.find(o => parseInt(o.text, 10) === year) ??
+    options.find(o => parseInt(o.value, 10) === year);
+  if (!match) return false;
+  await sel.selectOption({ value: match.value });
+  return true;
+}
+
+// Make sure the calendar is displaying the target month/year before we click #DayNN. No-op (and
+// no postback) when it already is, so callers can invoke it defensively before every day click.
+async function ensureCalendarMonth(page: Page, target: CalendarDate): Promise<void> {
+  if ((await page.locator('#ddlMonth').count()) === 0) {
+    log.info('booker.month.dropdown_absent');
+    return;
+  }
+
+  const currentMonth = monthFromText((await selectedOptionText(page, '#ddlMonth')) ?? '');
+  const currentYearText = await selectedOptionText(page, '#ddlYear');
+  const currentYear = currentYearText === null ? null : parseInt(currentYearText, 10);
+  const yearMatches = currentYear === null || Number.isNaN(currentYear) || currentYear === target.year;
+
+  if (currentMonth === target.month && yearMatches) {
+    log.info('booker.month.already_correct', { month: target.month, year: target.year });
+    return;
+  }
+
+  log.info('booker.month.navigating', {
+    from_month: currentMonth,
+    from_year: currentYear,
+    to_month: target.month,
+    to_month_name: target.monthName,
+    to_year: target.year,
+  });
+
+  const monthSelected = await selectMonthOption(page, target.month);
+  const yearSelected = await selectYearOption(page, target.year);
+  if (!monthSelected) {
+    log.error('booker.month.select_failed', { to_month: target.month, to_month_name: target.monthName });
+  }
+
+  // Re-render the calendar for the newly-selected month so #DayNN resolves to the target month.
+  const response = await clickDisplay(page);
+  log.info('booker.month.navigated', {
+    month: target.month,
+    year: target.year,
+    month_selected: monthSelected,
+    year_selected: yearSelected,
+    postback_status: response?.status() ?? 'timeout',
+  });
 }
 
 async function setGolfers(page: Page, golfers: number): Promise<void> {
@@ -427,6 +557,10 @@ async function waitForFullSlotList(page: Page, target: CalendarDate): Promise<vo
 async function clickTargetDay(page: Page, target: CalendarDate): Promise<void> {
   const dayId = `#Day${target.dayOfMonth}`;
   log.info('booker.day.click_target', { day_selector: dayId, iso: target.iso });
+
+  // Defensive: guarantee the calendar is on the target month before clicking #DayNN. Cheap and
+  // postback-free when the month is already correct; corrects it if a prior postback reset it.
+  await ensureCalendarMonth(page, target);
 
   // Wait for the ASP.NET postback to complete (rather than checking the DOM, which can return
   // stale "Compare..." slot links from a previous click before the new HTML lands).
